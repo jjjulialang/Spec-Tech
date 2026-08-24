@@ -1,4 +1,5 @@
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -47,6 +48,32 @@ class AgentHelpersTest(unittest.TestCase):
                 }
             ],
         )
+
+    def test_pdf_discovery_ignores_manifest_and_other_files(self):
+        original_dataset = agent.DATASET_DIR
+        try:
+            agent.DATASET_DIR = PRACTICE
+            self.assertEqual([path.name for path in agent.pdf_files()], ["schedule.pdf", "spec.pdf"])
+        finally:
+            agent.DATASET_DIR = original_dataset
+
+    def test_text_fallback_preserves_file_and_page_labels(self):
+        text = agent.extracted_text([PRACTICE / "schedule.pdf", PRACTICE / "spec.pdf"])
+        self.assertIn("===== schedule.pdf | PDF page 1 =====", text)
+        self.assertIn("D-202", text)
+        self.assertIn("===== spec.pdf | PDF page 1 =====", text)
+        self.assertIn("Section 08 11 00", text)
+
+    def test_main_writes_valid_empty_output_after_input_failure(self):
+        original_dataset, original_output = agent.DATASET_DIR, agent.OUTPUT_PATH
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                agent.DATASET_DIR = Path(directory)
+                agent.OUTPUT_PATH = Path(directory) / "result.json"
+                self.assertEqual(agent.main(), 0)
+                self.assertEqual(json.loads(agent.OUTPUT_PATH.read_text()), {"errors": []})
+            finally:
+                agent.DATASET_DIR, agent.OUTPUT_PATH = original_dataset, original_output
 
 
 class FakeResponse:
@@ -114,6 +141,37 @@ class AgentIntegrationTest(unittest.TestCase):
         self.assertEqual([part["type"] for part in first_content], ["text", "file", "file"])
         self.assertEqual(len(errors), 2)
         self.assertEqual({error["category"] for error in errors}, {"unit-error", "cross-document-conflict"})
+
+    def test_native_rejection_falls_back_to_extracted_text(self):
+        files = [PRACTICE / "schedule.pdf", PRACTICE / "spec.pdf"]
+        response = json.dumps(
+            {
+                "errors": [
+                    {
+                        "document": "schedule.pdf",
+                        "category": "unit-error",
+                        "location": "PDF page 1, L-1",
+                        "description": "L-1 says 5.0 gpm while section 22 40 00 requires 0.5 gpm.",
+                    }
+                ]
+            }
+        )
+        calls = []
+
+        def fake_call_model(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError("provider rejected native PDF input")
+            return response
+
+        with patch("agent.call_model", side_effect=fake_call_model):
+            errors = agent.audit(files)
+
+        self.assertEqual(len(calls), 3)  # rejected native discovery, text discovery, text verification
+        self.assertEqual(calls[0]["content"][1]["type"], "file")
+        self.assertEqual(calls[1]["content"][0]["type"], "text")
+        self.assertIn("D-202", calls[1]["content"][0]["text"])
+        self.assertEqual(errors[0]["document"], "schedule.pdf")
 
 
 if __name__ == "__main__":
