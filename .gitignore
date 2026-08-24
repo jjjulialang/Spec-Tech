@@ -14,6 +14,8 @@ assets/datasets/validation/
 # Local scratch
 *.tar.gz
 .DS_Store
+output.json
+__pycache__/
 
 # Provisioned event keys — never commit
 team-keys.csv
