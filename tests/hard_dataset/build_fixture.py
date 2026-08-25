@@ -61,9 +61,18 @@ def build_dataset(destination: Path) -> tuple[list[Path], dict]:
     destination.mkdir(parents=True, exist_ok=True)
     for filename, lines in cases["documents"].items():
         write_text_pdf(destination / filename, lines)
+    pdf_names = sorted(cases["documents"], key=str.casefold)
+    (destination / "files.json").write_text(
+        json.dumps(pdf_names, indent=2), encoding="utf-8"
+    )
     # These are traps: production discovery must enumerate only PDFs.
+    manifest = json.loads(json.dumps(cases["manifest"]))
+    expected = cases["expected_output"]["errors"]
+    for answer, report in zip(manifest["errors"], expected, strict=True):
+        answer["description"] = report["description"]
+        answer["page"] = 1
     (destination / "manifest.json").write_text(
-        json.dumps(cases["manifest"], indent=2), encoding="utf-8"
+        json.dumps(manifest, indent=2), encoding="utf-8"
     )
     (destination / "README.txt").write_text(
         "This non-PDF is not an input document.\n", encoding="utf-8"

@@ -66,6 +66,10 @@ class HardSyntheticDatasetTest(unittest.TestCase):
 
         self.assertEqual(discovered, self.files)
         self.assertEqual(len(discovered), 6)
+        self.assertEqual(
+            json.loads((self.dataset / "files.json").read_text(encoding="utf-8")),
+            [path.name for path in self.files],
+        )
         for path in discovered:
             raw = path.read_bytes()
             self.assertTrue(raw.startswith(b"%PDF-1.4"))
