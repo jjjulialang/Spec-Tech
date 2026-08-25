@@ -25,9 +25,9 @@ DATASET_DIR = Path(os.environ.get("DATASET_DIR", "./dataset"))
 OUTPUT_PATH = Path(os.environ.get("OUTPUT_PATH", "./output.json"))
 API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = os.environ.get("AEC_MODEL", "google/gemini-2.5-pro")
+MODEL = os.environ.get("AEC_MODEL", "google/gemini-3.1-pro-preview")
 VERIFY_MODEL = os.environ.get("AEC_VERIFY_MODEL", MODEL)
-FALLBACK_MODEL = os.environ.get("AEC_FALLBACK_MODEL", "google/gemini-2.5-flash")
+FALLBACK_MODEL = os.environ.get("AEC_FALLBACK_MODEL", "google/gemini-2.5-pro")
 
 ALLOWED_CATEGORIES = {
     "cross-document-conflict",
@@ -207,7 +207,9 @@ def pdf_files() -> list[Path]:
     return files
 
 
-def pdf_content(files: list[Path], prompt: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def pdf_content(
+    files: list[Path], prompt: str, *, engine: str = "native"
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Build native-PDF message content plus the OpenRouter parser declaration."""
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     for path in files:
@@ -221,7 +223,7 @@ def pdf_content(files: list[Path], prompt: str) -> tuple[list[dict[str, Any]], l
                 },
             }
         )
-    plugins = [{"id": "file-parser", "pdf": {"engine": "native"}}]
+    plugins = [{"id": "file-parser", "pdf": {"engine": engine}}]
     return content, plugins
 
 
@@ -269,6 +271,9 @@ def extracted_text(files: list[Path]) -> str:
 def response_text(data: dict[str, Any]) -> str:
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices:
+        error = data.get("error")
+        if error:
+            raise RuntimeError(f"OpenRouter response error: {error}")
         raise RuntimeError("OpenRouter response has no choices")
     if not isinstance(choices[0], dict):
         raise RuntimeError("OpenRouter returned an invalid choice")
@@ -307,14 +312,10 @@ def call_openrouter(
         ],
         "temperature": 0,
         "max_tokens": 8_000,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": schema_name,
-                "strict": True,
-                "schema": response_schema,
-            },
-        },
+        # Gemini rejected the larger strict schemas used here as having too
+        # many grammar states. Prompts still require exact JSON, and the local
+        # parser/sanitizer validates every field before submission.
+        "response_format": {"type": "json_object"},
     }
     if plugins:
         body["plugins"] = plugins
@@ -348,17 +349,6 @@ def call_openrouter(
         except urllib.error.HTTPError as exc:
             detail = exc.read(1000).decode("utf-8", errors="replace")
             exc.close()
-            if exc.code == 400 and attempt == 0:
-                # Some provider routes advertise structured output but reject
-                # particular JSON-Schema keywords. The prompts already demand
-                # exact JSON, so retry once in broadly compatible JSON mode.
-                body["response_format"] = {"type": "json_object"}
-                payload = json.dumps(body).encode("utf-8")
-                log(
-                    "Provider rejected strict schema; retrying the same model "
-                    f"in JSON mode: {detail}"
-                )
-                continue
             if exc.code not in {408, 409, 429, 500, 502, 503, 504} or attempt == 1:
                 raise RuntimeError(f"OpenRouter HTTP {exc.code}: {detail}") from exc
             retry_after = exc.headers.get("retry-after") if exc.headers else None
@@ -547,7 +537,9 @@ def verify_candidates(
     )
     try:
         if native_files:
-            verify_content, verify_plugins = pdf_content(native_files, verifier_prompt)
+            verify_content, verify_plugins = pdf_content(
+                native_files, verifier_prompt, engine="mistral-ocr"
+            )
         else:
             if not text_cache:
                 text_cache = extracted_text(files)
@@ -742,24 +734,39 @@ def audit(files: list[Path]) -> list[dict[str, str]]:
         raw = call_model(model=MODEL, content=discovery_content, plugins=plugins)
     except Exception as exc:
         del discovery_content
-        log(f"Native PDF analysis failed; retrying with extracted text: {exc}")
-        text_cache = extracted_text(files)
-        if not text_cache:
-            raise
-        raw = call_model(
-            model=MODEL,
-            content=[
-                {
-                    "type": "text",
-                    "text": DISCOVERY_PROMPT
-                    + "\n\nUNTRUSTED_DOCUMENTS_BEGIN\n"
-                    + text_cache
-                    + "\nUNTRUSTED_DOCUMENTS_END",
-                }
-            ],
-            plugins=None,
-        )
-        native_files: list[Path] | None = None
+        ocr_succeeded = False
+        if not oversized_singleton:
+            log(f"Native PDF analysis failed; retrying with document OCR: {exc}")
+            ocr_content, ocr_plugins = pdf_content(
+                files, DISCOVERY_PROMPT, engine="mistral-ocr"
+            )
+            try:
+                raw = call_model(model=MODEL, content=ocr_content, plugins=ocr_plugins)
+            except Exception as ocr_exc:
+                del ocr_content
+                log(f"Document OCR analysis failed; retrying extracted text: {ocr_exc}")
+            else:
+                del ocr_content
+                native_files = files
+                ocr_succeeded = True
+        if not ocr_succeeded:
+            text_cache = extracted_text(files)
+            if not text_cache:
+                raise
+            raw = call_model(
+                model=MODEL,
+                content=[
+                    {
+                        "type": "text",
+                        "text": DISCOVERY_PROMPT
+                        + "\n\nUNTRUSTED_DOCUMENTS_BEGIN\n"
+                        + text_cache
+                        + "\nUNTRUSTED_DOCUMENTS_END",
+                    }
+                ],
+                plugins=None,
+            )
+            native_files = None
     else:
         del discovery_content
         # Preserve text-only verification for oversized singleton inputs.

@@ -139,20 +139,15 @@ class AgentIntegrationTest(unittest.TestCase):
         self.assertEqual([part["type"] for part in first_content], ["text", "file", "file"])
         self.assertIn("UNTRUSTED EVIDENCE", FakeResponse.calls[0]["messages"][0]["content"])
         response_format = FakeResponse.calls[0]["response_format"]
-        self.assertEqual(response_format["type"], "json_schema")
-        self.assertTrue(response_format["json_schema"]["strict"])
+        self.assertEqual(response_format, {"type": "json_object"})
+        self.assertEqual(FakeResponse.calls[1]["response_format"], {"type": "json_object"})
         self.assertEqual(
-            FakeResponse.calls[1]["response_format"]["json_schema"]["name"],
-            "aec_verification",
-        )
-        self.assertIn(
-            "accepted_ids",
-            FakeResponse.calls[1]["response_format"]["json_schema"]["schema"]["properties"],
+            FakeResponse.calls[1]["plugins"][0]["pdf"]["engine"], "mistral-ocr"
         )
         self.assertEqual(len(errors), 2)
         self.assertEqual({error["category"] for error in errors}, {"unit-error", "cross-document-conflict"})
 
-    def test_native_rejection_falls_back_to_extracted_text(self):
+    def test_native_rejection_falls_back_to_document_ocr(self):
         files = [PRACTICE / "schedule.pdf", PRACTICE / "spec.pdf"]
         response = json.dumps(
             {
@@ -177,10 +172,10 @@ class AgentIntegrationTest(unittest.TestCase):
         with patch("agent.call_model", side_effect=fake_call_model):
             errors = agent.audit(files)
 
-        self.assertEqual(len(calls), 3)  # rejected native discovery, text discovery, text verification
+        self.assertEqual(len(calls), 3)  # rejected native discovery, OCR discovery, OCR verification
         self.assertEqual(calls[0]["content"][1]["type"], "file")
-        self.assertEqual(calls[1]["content"][0]["type"], "text")
-        self.assertIn("D-202", calls[1]["content"][0]["text"])
+        self.assertEqual(calls[1]["content"][1]["type"], "file")
+        self.assertEqual(calls[1]["plugins"][0]["pdf"]["engine"], "mistral-ocr")
         self.assertEqual(errors[0]["document"], "schedule.pdf")
 
     def test_invalid_or_empty_verifier_cannot_erase_discovery(self):

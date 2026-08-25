@@ -18,7 +18,7 @@ read -s OPENROUTER_API_KEY
 export OPENROUTER_API_KEY
 export DATASET_DIR="$PWD/examples/practice-dataset"
 export OUTPUT_PATH="$PWD/output.json"
-export AEC_MODEL="google/gemini-2.5-pro"
+export AEC_MODEL="google/gemini-3.1-pro-preview"
 bash run.sh
 python3 -m json.tool "$OUTPUT_PATH"
 unset OPENROUTER_API_KEY
@@ -36,9 +36,9 @@ never reads `manifest.json`.
 Optional model overrides:
 
 ```bash
-export AEC_MODEL="google/gemini-2.5-pro"
+export AEC_MODEL="google/gemini-3.1-pro-preview"
 export AEC_VERIFY_MODEL="$AEC_MODEL"
-export AEC_FALLBACK_MODEL="google/gemini-2.5-flash"
+export AEC_FALLBACK_MODEL="google/gemini-2.5-pro"
 ```
 
 ## Run local checks
