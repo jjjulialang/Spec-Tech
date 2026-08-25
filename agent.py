@@ -24,6 +24,7 @@ from typing import Any
 DATASET_DIR = Path(os.environ.get("DATASET_DIR", "./dataset"))
 OUTPUT_PATH = Path(os.environ.get("OUTPUT_PATH", "./output.json"))
 API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+DEBUG_RESPONSES = os.environ.get("AEC_DEBUG_RESPONSES") == "1"
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = os.environ.get("AEC_MODEL", "google/gemini-3.1-pro-preview")
 VERIFY_MODEL = os.environ.get("AEC_VERIFY_MODEL", MODEL)
@@ -193,6 +194,11 @@ CANDIDATES:
 
 def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
+
+
+def log_model_response(phase: str, raw: str) -> None:
+    if DEBUG_RESPONSES:
+        log(f"{phase} model JSON: {raw[:12_000]}")
 
 
 def pdf_files() -> list[Path]:
@@ -417,6 +423,25 @@ def parse_findings_response(text: str) -> dict[str, Any] | None:
     return data if isinstance(data.get("errors"), list) else None
 
 
+def document_tokens(value: str) -> set[str]:
+    """Extract conservative title tokens for mapping PDF titles to filenames."""
+    aliases = {
+        "drawings": "drawing",
+        "schedules": "schedule",
+        "specifications": "spec",
+        "specification": "spec",
+        "specs": "spec",
+        "notes": "note",
+    }
+    ignored = {"document", "documents", "file", "pdf", "practice", "project", "set"}
+    tokens = set()
+    for token in re.findall(r"[a-z0-9]+", Path(value).stem.casefold()):
+        token = aliases.get(token, token)
+        if len(token) >= 3 and token not in ignored:
+            tokens.add(token)
+    return tokens
+
+
 def canonical_document(value: Any, files: list[Path]) -> str | None:
     if not isinstance(value, str):
         return None
@@ -431,7 +456,23 @@ def canonical_document(value: Any, files: list[Path]) -> str | None:
         return None
     stem = Path(supplied).stem.casefold()
     matches = [p.name for p in files if p.stem.casefold() == stem]
-    return matches[0] if len(matches) == 1 else None
+    if len(matches) == 1:
+        return matches[0]
+
+    # PDF parsers sometimes expose the document's embedded title instead of
+    # the uploaded filename (for example, "Project Schedules - Practice
+    # Set.pdf" for schedule.pdf). Map only a unique, meaningful title-token
+    # match; arbitrary unknown names remain rejected.
+    if Path(supplied).suffix.casefold() != ".pdf":
+        return None
+    supplied_tokens = document_tokens(supplied)
+    scored = [
+        (len(supplied_tokens & document_tokens(path.name)), path.name)
+        for path in files
+    ]
+    best = max((score for score, _ in scored), default=0)
+    best_names = [name for score, name in scored if score == best and score > 0]
+    return best_names[0] if len(best_names) == 1 else None
 
 
 def clean_errors(data: dict[str, Any], files: list[Path]) -> list[dict[str, str]]:
@@ -560,6 +601,7 @@ def verify_candidates(
             response_schema=VERIFICATION_SCHEMA,
             schema_name="aec_verification",
         )
+        log_model_response("Verification", verified_raw)
         del verify_content
         verified_data = parse_json_object(verified_raw)
 
@@ -706,6 +748,14 @@ def audit(files: list[Path]) -> list[dict[str, str]]:
     if len(batches) > 1:
         return audit_batched(files, batches)
 
+    # Native PDF tools may show models an embedded title that differs from the
+    # actual upload name. Put the authoritative names immediately beside the
+    # task so the output can satisfy the grader contract exactly.
+    discovery_prompt = (
+        DISCOVERY_PROMPT
+        + "\n\nAUTHORITATIVE SUPPLIED PDF FILENAMES (use only these in `document`):\n- "
+        + "\n- ".join(path.name for path in files)
+    )
     text_cache = ""
     oversized_singleton = len(files) == 1 and files[0].stat().st_size > MAX_NATIVE_PDF_BYTES
     if oversized_singleton:
@@ -718,7 +768,7 @@ def audit(files: list[Path]) -> list[dict[str, str]]:
         discovery_content = [
             {
                 "type": "text",
-                "text": DISCOVERY_PROMPT
+                "text": discovery_prompt
                 + "\n\nUNTRUSTED_DOCUMENTS_BEGIN\n"
                 + text_cache
                 + "\nUNTRUSTED_DOCUMENTS_END",
@@ -727,7 +777,7 @@ def audit(files: list[Path]) -> list[dict[str, str]]:
         plugins = None
         native_files: list[Path] | None = None
     else:
-        discovery_content, plugins = pdf_content(files, DISCOVERY_PROMPT)
+        discovery_content, plugins = pdf_content(files, discovery_prompt)
         native_files = files
 
     try:
@@ -738,7 +788,7 @@ def audit(files: list[Path]) -> list[dict[str, str]]:
         if not oversized_singleton:
             log(f"Native PDF analysis failed; retrying with document OCR: {exc}")
             ocr_content, ocr_plugins = pdf_content(
-                files, DISCOVERY_PROMPT, engine="mistral-ocr"
+                files, discovery_prompt, engine="mistral-ocr"
             )
             try:
                 raw = call_model(model=MODEL, content=ocr_content, plugins=ocr_plugins)
@@ -758,7 +808,7 @@ def audit(files: list[Path]) -> list[dict[str, str]]:
                 content=[
                     {
                         "type": "text",
-                        "text": DISCOVERY_PROMPT
+                        "text": discovery_prompt
                         + "\n\nUNTRUSTED_DOCUMENTS_BEGIN\n"
                         + text_cache
                         + "\nUNTRUSTED_DOCUMENTS_END",
@@ -774,6 +824,7 @@ def audit(files: list[Path]) -> list[dict[str, str]]:
             native_files = files
 
     discovery_data = parse_findings_response(raw)
+    log_model_response("Discovery", raw)
     candidates = clean_errors(discovery_data or {}, files)
     log(f"Discovery produced {len(candidates)} schema-valid candidate(s)")
 

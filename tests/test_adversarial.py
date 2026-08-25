@@ -85,6 +85,15 @@ class FindingSanitizationAdversarialTest(unittest.TestCase):
         files = [Path("/dataset/A.pdf"), Path("/dataset/a.PDF")]
         self.assertIsNone(agent.canonical_document("a.pdf", files))
 
+    def test_embedded_pdf_title_maps_to_unique_supplied_filename(self):
+        self.assertEqual(
+            agent.canonical_document("Project Schedules - Practice Set.pdf", self.files),
+            "schedule.pdf",
+        )
+
+    def test_unrelated_embedded_pdf_title_is_rejected(self):
+        self.assertIsNone(agent.canonical_document("Invented Results.pdf", self.files))
+
     def test_unknown_categories_and_non_list_errors_are_discarded(self):
         unknown = finding(category=" prompt-injection ")
         self.assertEqual(agent.clean_errors({"errors": [unknown]}, self.files), [])
