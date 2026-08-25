@@ -25,9 +25,9 @@ DATASET_DIR = Path(os.environ.get("DATASET_DIR", "./dataset"))
 OUTPUT_PATH = Path(os.environ.get("OUTPUT_PATH", "./output.json"))
 API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = os.environ.get("AEC_MODEL", "google/gemini-3.1-pro-preview")
+MODEL = os.environ.get("AEC_MODEL", "google/gemini-2.5-pro")
 VERIFY_MODEL = os.environ.get("AEC_VERIFY_MODEL", MODEL)
-FALLBACK_MODEL = os.environ.get("AEC_FALLBACK_MODEL", "google/gemini-2.5-pro")
+FALLBACK_MODEL = os.environ.get("AEC_FALLBACK_MODEL", "google/gemini-2.5-flash")
 
 ALLOWED_CATEGORIES = {
     "cross-document-conflict",
@@ -184,6 +184,8 @@ Omit an ID only if output truncation prevents review; omitted candidates will be
 preserved for safety. Add a missed error only when unmistakable.
 
 Return ONLY the requested JSON schema, with no markdown.
+Example shape:
+{"accepted_ids":[0],"rejected_ids":[1],"corrected_errors":[],"added_errors":[]}
 
 CANDIDATES:
 """.strip()
@@ -345,6 +347,18 @@ def call_openrouter(
                 return response_text(json.loads(raw_response.decode("utf-8")))
         except urllib.error.HTTPError as exc:
             detail = exc.read(1000).decode("utf-8", errors="replace")
+            exc.close()
+            if exc.code == 400 and attempt == 0:
+                # Some provider routes advertise structured output but reject
+                # particular JSON-Schema keywords. The prompts already demand
+                # exact JSON, so retry once in broadly compatible JSON mode.
+                body["response_format"] = {"type": "json_object"}
+                payload = json.dumps(body).encode("utf-8")
+                log(
+                    "Provider rejected strict schema; retrying the same model "
+                    f"in JSON mode: {detail}"
+                )
+                continue
             if exc.code not in {408, 409, 429, 500, 502, 503, 504} or attempt == 1:
                 raise RuntimeError(f"OpenRouter HTTP {exc.code}: {detail}") from exc
             retry_after = exc.headers.get("retry-after") if exc.headers else None

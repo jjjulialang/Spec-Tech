@@ -256,6 +256,31 @@ class NetworkAndFallbackAdversarialTest(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 2)
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [2])
 
+    def test_bad_schema_request_retries_in_plain_json_mode(self):
+        payloads = []
+
+        def reject_schema_then_accept(request, **_kwargs):
+            payloads.append(json.loads(request.data))
+            if len(payloads) == 1:
+                raise urllib.error.HTTPError(
+                    "https://openrouter.ai", 400, "bad request", {}, io.BytesIO(b"schema rejected")
+                )
+            return self.Response()
+
+        with (
+            patch.object(agent, "API_KEY", "test-key"),
+            patch.object(agent, "DEADLINE", 10_000),
+            patch("agent.time.monotonic", return_value=0),
+            patch("agent.urllib.request.urlopen", side_effect=reject_schema_then_accept),
+        ):
+            result = agent.call_openrouter(
+                model="test/model", content=[{"type": "text", "text": "hi"}], plugins=None
+            )
+
+        self.assertEqual(result, '{"errors":[]}')
+        self.assertEqual(payloads[0]["response_format"]["type"], "json_schema")
+        self.assertEqual(payloads[1]["response_format"], {"type": "json_object"})
+
     def test_model_fallback_is_used_after_primary_failure(self):
         models = []
 
