@@ -1,7 +1,12 @@
 #!/bin/bash
-# Entrypoint used by the Acelab grader. The documented runtime already includes
-# pypdf, so avoid spending any of the 10-minute run limit on package setup.
+# Entry point. The grader executes this file at the repo root.
+#
+# Environment provided by the runner:
+#   DATASET_DIR         - directory of PDF documents (enumerate; do not hardcode names)
+#   OUTPUT_PATH         - where to write output.json (required schema)
+#   OPENROUTER_API_KEY  - credential for https://openrouter.ai/api/v1
+#
+# Network: pip (PyPI) then OpenRouter only. Finish within 10 minutes.
 set -u
-
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec python3 "$SCRIPT_DIR/agent.py"
+pip3 install --disable-pip-version-check --quiet pymupdf pypdf || pip3 install --disable-pip-version-check --quiet pypdf || true
+python3 find_errors.py

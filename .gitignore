@@ -5,6 +5,7 @@ dist/
 
 # Secrets — never commit
 .dev.vars
+.env
 
 # Private datasets — these must NOT reach the public repo.
 # `wrangler deploy` still uploads them because wrangler does not read .gitignore.

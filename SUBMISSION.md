@@ -1,8 +1,9 @@
 # Spec-Tech submission guide
 
-This repository's participant entry consists of `run.sh` and `agent.py` at
-the repository root. The grader executes `run.sh`; the rest of the original
-ACELAB repository is reference and organizer infrastructure.
+On branch `hackathon-live-agent`, the grader entry is `run.sh` → `find_errors.py`
+at the repository root. `agent.py` is left in place from the previous branch and
+is not executed. The rest of the original ACELAB repository is reference and
+organizer infrastructure.
 
 ## Run against the practice dataset
 
