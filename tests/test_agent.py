@@ -120,7 +120,7 @@ class FakeResponse:
     def __exit__(self, *_args):
         return False
 
-    def read(self):
+    def read(self, _size=-1):
         return self.payload
 
 
@@ -137,8 +137,13 @@ class AgentIntegrationTest(unittest.TestCase):
             agent.API_KEY = original_key
 
         self.assertEqual(len(FakeResponse.calls), 2)
-        first_content = FakeResponse.calls[0]["messages"][0]["content"]
+        self.assertEqual(FakeResponse.calls[0]["messages"][0]["role"], "system")
+        first_content = FakeResponse.calls[0]["messages"][1]["content"]
         self.assertEqual([part["type"] for part in first_content], ["text", "file", "file"])
+        self.assertIn("UNTRUSTED EVIDENCE", FakeResponse.calls[0]["messages"][0]["content"])
+        response_format = FakeResponse.calls[0]["response_format"]
+        self.assertEqual(response_format["type"], "json_schema")
+        self.assertTrue(response_format["json_schema"]["strict"])
         self.assertEqual(len(errors), 2)
         self.assertEqual({error["category"] for error in errors}, {"unit-error", "cross-document-conflict"})
 
@@ -172,6 +177,45 @@ class AgentIntegrationTest(unittest.TestCase):
         self.assertEqual(calls[1]["content"][0]["type"], "text")
         self.assertIn("D-202", calls[1]["content"][0]["text"])
         self.assertEqual(errors[0]["document"], "schedule.pdf")
+
+    def test_invalid_or_empty_verifier_cannot_erase_discovery(self):
+        files = [PRACTICE / "schedule.pdf", PRACTICE / "spec.pdf"]
+        discovery = json.dumps(
+            {
+                "errors": [
+                    {
+                        "document": "schedule.pdf",
+                        "category": "unit-error",
+                        "location": "PDF page 1, L-1",
+                        "description": "L-1 says 5.0 gpm while the requirement is 0.5 gpm.",
+                    }
+                ]
+            }
+        )
+        for verifier in ("not json", "{}", '{"errors":[]}'):
+            with self.subTest(verifier=verifier), patch(
+                "agent.call_model", side_effect=[discovery, verifier]
+            ):
+                errors = agent.audit(files)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("L-1", errors[0]["description"])
+
+    def test_partial_verifier_cannot_erase_most_discovery_results(self):
+        files = [PRACTICE / "schedule.pdf", PRACTICE / "spec.pdf"]
+        candidates = [
+            {
+                "document": "schedule.pdf",
+                "category": "cross-document-conflict",
+                "location": f"PDF page 1, item X-{index}",
+                "description": f"Item X-{index} says {index} while the specification requires {index + 10}.",
+            }
+            for index in range(1, 5)
+        ]
+        discovery = json.dumps({"errors": candidates})
+        partial = json.dumps({"errors": [candidates[0]]})
+        with patch("agent.call_model", side_effect=[discovery, partial]):
+            errors = agent.audit(files)
+        self.assertEqual(errors, candidates)
 
 
 if __name__ == "__main__":

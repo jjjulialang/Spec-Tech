@@ -3,4 +3,5 @@
 # pypdf, so avoid spending any of the 10-minute run limit on package setup.
 set -u
 
-python3 agent.py
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec python3 "$SCRIPT_DIR/agent.py"

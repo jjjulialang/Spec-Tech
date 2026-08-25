@@ -10,6 +10,10 @@ From the repository root, enter the OpenRouter key without saving it in shell
 history or a tracked file:
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install pypdf
+
 read -s OPENROUTER_API_KEY
 export OPENROUTER_API_KEY
 export DATASET_DIR="$PWD/examples/practice-dataset"
@@ -43,6 +47,14 @@ export AEC_FALLBACK_MODEL="google/gemini-2.5-pro"
 python3 -m unittest discover -s tests -v
 python3 -m py_compile agent.py tests/test_agent.py
 bash -n run.sh
+```
+
+To spend two real OpenRouter calls and validate the complete Gemini path:
+
+```bash
+export RUN_LIVE_OPENROUTER_TEST=1
+python3 -m unittest discover -s tests -p 'test_live_openrouter.py' -v
+unset RUN_LIVE_OPENROUTER_TEST
 ```
 
 ## Submit to the grader

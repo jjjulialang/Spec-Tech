@@ -16,6 +16,7 @@ assets/datasets/validation/
 .DS_Store
 output.json
 __pycache__/
+.venv/
 
 # Provisioned event keys — never commit
 team-keys.csv
