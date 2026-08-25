@@ -95,13 +95,10 @@ class FakeResponse:
             }
         else:
             result = {
-                "errors": [
-                    {
-                        "document": "schedule.pdf",
-                        "category": "unit-error",
-                        "location": "PDF page 1, L-1",
-                        "description": "L-1 says 5.0 gpm while section 22 40 00 requires 0.5 gpm.",
-                    },
+                "accepted_ids": [0],
+                "rejected_ids": [],
+                "corrected_errors": [],
+                "added_errors": [
                     {
                         "document": "schedule.pdf",
                         "category": "cross-document-conflict",
@@ -144,6 +141,14 @@ class AgentIntegrationTest(unittest.TestCase):
         response_format = FakeResponse.calls[0]["response_format"]
         self.assertEqual(response_format["type"], "json_schema")
         self.assertTrue(response_format["json_schema"]["strict"])
+        self.assertEqual(
+            FakeResponse.calls[1]["response_format"]["json_schema"]["name"],
+            "aec_verification",
+        )
+        self.assertIn(
+            "accepted_ids",
+            FakeResponse.calls[1]["response_format"]["json_schema"]["schema"]["properties"],
+        )
         self.assertEqual(len(errors), 2)
         self.assertEqual({error["category"] for error in errors}, {"unit-error", "cross-document-conflict"})
 
@@ -214,6 +219,54 @@ class AgentIntegrationTest(unittest.TestCase):
         discovery = json.dumps({"errors": candidates})
         partial = json.dumps({"errors": [candidates[0]]})
         with patch("agent.call_model", side_effect=[discovery, partial]):
+            errors = agent.audit(files)
+        self.assertEqual(errors, candidates)
+
+    def test_explicit_verdicts_allow_safe_aggressive_pruning(self):
+        files = [PRACTICE / "schedule.pdf", PRACTICE / "spec.pdf"]
+        candidates = [
+            {
+                "document": "schedule.pdf",
+                "category": "cross-document-conflict",
+                "location": f"PDF page 1, item X-{index}",
+                "description": f"Item X-{index} says {index} while the specification requires {index + 10}.",
+            }
+            for index in range(4)
+        ]
+        verdicts = {
+            "accepted_ids": [0],
+            "rejected_ids": [1, 2, 3],
+            "corrected_errors": [],
+            "added_errors": [],
+        }
+        with patch(
+            "agent.call_model",
+            side_effect=[json.dumps({"errors": candidates}), json.dumps(verdicts)],
+        ):
+            errors = agent.audit(files)
+        self.assertEqual(errors, [candidates[0]])
+
+    def test_unreviewed_candidate_survives_truncated_verdicts(self):
+        files = [PRACTICE / "schedule.pdf", PRACTICE / "spec.pdf"]
+        candidates = [
+            {
+                "document": "schedule.pdf",
+                "category": "unit-error",
+                "location": f"PDF page 1, fixture L-{index}",
+                "description": f"Fixture L-{index} says {index}.0 gpm instead of 0.{index} gpm.",
+            }
+            for index in range(1, 3)
+        ]
+        partial_verdicts = {
+            "accepted_ids": [0],
+            "rejected_ids": [],
+            "corrected_errors": [],
+            "added_errors": [],
+        }
+        with patch(
+            "agent.call_model",
+            side_effect=[json.dumps({"errors": candidates}), json.dumps(partial_verdicts)],
+        ):
             errors = agent.audit(files)
         self.assertEqual(errors, candidates)
 

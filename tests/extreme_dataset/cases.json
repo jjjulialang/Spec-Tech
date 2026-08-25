@@ -1,0 +1,25 @@
+{
+  "manifest": {
+    "errors": [
+      {"id": "X01", "document": "A-900_life-safety.pdf", "category": "cross-document-conflict", "page": 2, "keywords": ["D-307", "30 min", "90 minute"]},
+      {"id": "X02", "document": "M-900_equipment.pdf", "category": "cross-document-conflict", "page": 3, "keywords": ["AHU-12", "208 V", "480 V"]},
+      {"id": "X03", "document": "P-900_plumbing.pdf", "category": "unit-error", "page": 1, "keywords": ["L-17", "0.05 gpm", "0.5 gpm"]},
+      {"id": "X04", "document": "P-900_plumbing.pdf", "category": "unit-error", "page": 2, "keywords": ["CHW-17", "6 mm", "150 mm"]},
+      {"id": "X05", "document": "M-900_equipment.pdf", "category": "missing-item", "page": 3, "keywords": ["KEF-19", "Kitchen 307"]},
+      {"id": "X06", "document": "A-900_life-safety.pdf", "category": "code-violation", "page": 2, "keywords": ["North Alcove", "18 in", "60 in"]},
+      {"id": "X07", "document": "A-900_life-safety.pdf", "category": "code-violation", "page": 2, "keywords": ["South Vestibule", "18 in", "60 in"]}
+    ]
+  },
+  "expected_output": {
+    "errors": [
+      {"document": "A-900_life-safety.pdf", "category": "cross-document-conflict", "location": "PDF page 2, current door schedule D-307", "description": "Door D-307 is currently scheduled at 30 min, but section 08 11 00 requires a 90 minute rating."},
+      {"document": "M-900_equipment.pdf", "category": "cross-document-conflict", "location": "PDF page 3, current equipment schedule AHU-12", "description": "AHU-12 is scheduled at 208 V, while the plan and section 23 05 00 require 480 V."},
+      {"document": "P-900_plumbing.pdf", "category": "unit-error", "location": "PDF page 1, fixture schedule L-17", "description": "Lavatory L-17 is listed at 0.05 gpm instead of the specified maximum 0.5 gpm."},
+      {"document": "P-900_plumbing.pdf", "category": "unit-error", "location": "PDF page 2, scanned detail CHW-17", "description": "CHW-17 is labeled 6 mm diameter instead of the specified 150 mm diameter."},
+      {"document": "M-900_equipment.pdf", "category": "missing-item", "location": "PDF page 3, current exhaust fan schedule", "description": "Required kitchen exhaust fan KEF-19 for Kitchen 307 is missing from the current equipment schedule."},
+      {"document": "A-900_life-safety.pdf", "category": "code-violation", "location": "PDF page 2, North Alcove accessible route", "description": "The North Alcove route has 18 in clear width instead of the required 60 in clear width."},
+      {"document": "A-900_life-safety.pdf", "category": "code-violation", "location": "PDF page 2, South Vestibule accessible route", "description": "The South Vestibule route has 18 in clear width instead of the required 60 in clear width."}
+    ]
+  },
+  "precision_traps": ["D-307A", "REV 1 SUPERSEDED", "6 in = 152.4 mm", "8.33 percent = 1:12", "AHU-12A"]
+}

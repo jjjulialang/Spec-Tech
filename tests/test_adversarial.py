@@ -290,6 +290,19 @@ class NetworkAndFallbackAdversarialTest(unittest.TestCase):
     def test_submission_endpoint_cannot_be_overridden_by_environment(self):
         self.assertEqual(agent.API_URL, "https://openrouter.ai/api/v1/chat/completions")
 
+    def test_local_provider_call_cap_stays_below_sandbox_limit(self):
+        with (
+            patch.object(agent, "API_KEY", "test-key"),
+            patch.object(agent, "PROVIDER_CALLS", agent.MAX_PROVIDER_CALLS),
+            patch("agent.urllib.request.urlopen") as urlopen,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "call safety limit"):
+                agent.call_openrouter(
+                    model="test/model", content=[{"type": "text", "text": "hi"}], plugins=None
+                )
+        urlopen.assert_not_called()
+        self.assertLess(agent.MAX_PROVIDER_CALLS, 300)
+
 
 class LargeSetAndEntrypointAdversarialTest(unittest.TestCase):
     def test_single_oversized_pdf_uses_text_without_native_encoding(self):
@@ -311,6 +324,25 @@ class LargeSetAndEntrypointAdversarialTest(unittest.TestCase):
         self.assertTrue(
             all(call.kwargs["content"][0]["type"] == "text" for call in model.call_args_list)
         )
+
+    def test_multiple_oversized_pdfs_never_bypass_native_cap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            files = []
+            for name in ("one.pdf", "two.pdf"):
+                path = Path(directory, name)
+                path.write_bytes(b"larger than cap")
+                files.append(path)
+            responses = [json.dumps({"errors": []})] * 3
+            with (
+                patch.object(agent, "MAX_NATIVE_PDF_BYTES", 1),
+                patch("agent.pdf_content") as native_content,
+                patch("agent.extracted_text", return_value="bounded text"),
+                patch("agent.call_model", side_effect=responses) as model,
+            ):
+                self.assertEqual(agent.audit(files), [])
+
+        native_content.assert_not_called()
+        self.assertEqual(model.call_count, 3)
 
     def test_large_set_uses_native_batches_then_global_text_verification(self):
         files = [

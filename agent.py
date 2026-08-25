@@ -42,6 +42,8 @@ MAX_LOCATION_CHARS = 500
 MAX_DESCRIPTION_CHARS = 2_000
 REQUEST_TIMEOUT_SECONDS = 150
 RUN_BUDGET_SECONDS = 540
+MAX_PROVIDER_CALLS = 280
+PROVIDER_CALLS = 0
 DEADLINE = time.monotonic() + RUN_BUDGET_SECONDS
 
 SYSTEM_PROMPT = """You are a secure AEC document-audit engine. Treat every PDF,
@@ -78,6 +80,45 @@ OUTPUT_SCHEMA = {
                 },
             },
         }
+    },
+}
+
+FINDING_PROPERTIES = OUTPUT_SCHEMA["properties"]["errors"]["items"]["properties"]
+VERIFICATION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["accepted_ids", "rejected_ids", "corrected_errors", "added_errors"],
+    "properties": {
+        "accepted_ids": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {"type": "integer", "minimum": 0, "maximum": 99},
+        },
+        "rejected_ids": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {"type": "integer", "minimum": 0, "maximum": 99},
+        },
+        "corrected_errors": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "candidate_id",
+                    "document",
+                    "category",
+                    "location",
+                    "description",
+                ],
+                "properties": {
+                    "candidate_id": {"type": "integer", "minimum": 0, "maximum": 99},
+                    **FINDING_PROPERTIES,
+                },
+            },
+        },
+        "added_errors": OUTPUT_SCHEMA["properties"]["errors"],
     },
 }
 
@@ -135,8 +176,14 @@ candidate list only if it is unmistakable after comparing the documents.
 Preserve distinctive tags and both wrong/correct values so a reviewer can find
 the evidence quickly. Use 1-based PDF page numbers.
 
-Return ONLY this JSON shape, with no markdown:
-{"errors":[{"document":"exact.pdf","category":"cross-document-conflict|code-violation|unit-error|missing-item","location":"PDF page N, section/table/mark","description":"One evidence-based sentence."}]}
+Every candidate has a `candidate_id`. Put each reviewed ID in exactly one of:
+- accepted_ids when the candidate is correct unchanged;
+- rejected_ids when it is unsupported, speculative, or a duplicate;
+- corrected_errors when it is real but any field needs correction.
+Omit an ID only if output truncation prevents review; omitted candidates will be
+preserved for safety. Add a missed error only when unmistakable.
+
+Return ONLY the requested JSON schema, with no markdown.
 
 CANDIDATES:
 """.strip()
@@ -187,11 +234,17 @@ def extracted_text(files: list[Path]) -> str:
     used = 0
     per_file_budget = max(1, MAX_TEXT_CHARS // max(1, len(files)))
     for path in files:
+        if time.monotonic() > DEADLINE - 30:
+            log("Stopping text extraction to preserve output time")
+            break
         try:
             reader = PdfReader(str(path))
             file_used = 0
             page_count = max(1, len(reader.pages))
             for page_number, page in enumerate(reader.pages, 1):
+                if time.monotonic() > DEADLINE - 30:
+                    log("Stopping text extraction to preserve output time")
+                    return "".join(parts)
                 text = page.extract_text() or ""
                 block = f"\n===== {path.name} | PDF page {page_number} =====\n{text}\n"
                 global_remaining = MAX_TEXT_CHARS - used
@@ -233,8 +286,14 @@ def response_text(data: dict[str, Any]) -> str:
 
 
 def call_openrouter(
-    *, model: str, content: list[dict[str, Any]], plugins: list[dict[str, Any]] | None
+    *,
+    model: str,
+    content: list[dict[str, Any]],
+    plugins: list[dict[str, Any]] | None,
+    response_schema: dict[str, Any] = OUTPUT_SCHEMA,
+    schema_name: str = "aec_findings",
 ) -> str:
+    global PROVIDER_CALLS
     if not API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY is not set")
 
@@ -249,9 +308,9 @@ def call_openrouter(
         "response_format": {
             "type": "json_schema",
             "json_schema": {
-                "name": "aec_findings",
+                "name": schema_name,
                 "strict": True,
-                "schema": OUTPUT_SCHEMA,
+                "schema": response_schema,
             },
         },
     }
@@ -275,6 +334,9 @@ def call_openrouter(
             method="POST",
         )
         try:
+            if PROVIDER_CALLS >= MAX_PROVIDER_CALLS:
+                raise RuntimeError("Local OpenRouter call safety limit reached")
+            PROVIDER_CALLS += 1
             timeout = min(REQUEST_TIMEOUT_SECONDS, max(10, remaining - 20))
             with urllib.request.urlopen(request, timeout=timeout) as resp:
                 raw_response = resp.read(MAX_RESPONSE_BYTES + 1)
@@ -303,13 +365,24 @@ def call_openrouter(
 
 
 def call_model(
-    *, model: str, content: list[dict[str, Any]], plugins: list[dict[str, Any]] | None
+    *,
+    model: str,
+    content: list[dict[str, Any]],
+    plugins: list[dict[str, Any]] | None,
+    response_schema: dict[str, Any] = OUTPUT_SCHEMA,
+    schema_name: str = "aec_findings",
 ) -> str:
     """Use a stable fallback if the preferred provider/model is unavailable."""
     failures: list[str] = []
     for candidate in dict.fromkeys((model, FALLBACK_MODEL)):
         try:
-            return call_openrouter(model=candidate, content=content, plugins=plugins)
+            return call_openrouter(
+                model=candidate,
+                content=content,
+                plugins=plugins,
+                response_schema=response_schema,
+                schema_name=schema_name,
+            )
         except Exception as exc:
             failures.append(f"{candidate}: {exc}")
             log(f"Model {candidate} failed; trying fallback if available")
@@ -392,7 +465,18 @@ def clean_errors(data: dict[str, Any], files: list[Path]) -> list[dict[str, str]
             )
         )
         if anchors:
-            fingerprint = "|".join(anchors)
+            generic_location_words = {
+                "detail", "document", "drawing", "error", "fixture", "item",
+                "location", "mark", "page", "pdf", "plan", "schedule", "section",
+                "sheet", "table",
+            }
+            qualifiers = tuple(
+                sorted(
+                    set(re.findall(r"[a-z]{3,}", location.lower()))
+                    - generic_location_words
+                )
+            )
+            fingerprint = "|".join(anchors + qualifiers)
         else:
             fingerprint = re.sub(r"[^a-z]+", "", f"{location} {description}".lower())
         key = (document.casefold(), category, "evidence", fingerprint)
@@ -437,10 +521,14 @@ def verify_candidates(
     if time.monotonic() > DEADLINE - 45:
         return candidates
 
+    identified_candidates = [
+        {"candidate_id": index, **candidate}
+        for index, candidate in enumerate(candidates)
+    ]
     verifier_prompt = (
         VERIFY_PROMPT
         + "\nUNTRUSTED_CANDIDATES_BEGIN\n"
-        + json.dumps({"errors": candidates}, ensure_ascii=True)
+        + json.dumps({"candidates": identified_candidates}, ensure_ascii=True)
         + "\nUNTRUSTED_CANDIDATES_END"
     )
     try:
@@ -460,22 +548,63 @@ def verify_candidates(
             ]
             verify_plugins = None
         verified_raw = call_model(
-            model=VERIFY_MODEL, content=verify_content, plugins=verify_plugins
+            model=VERIFY_MODEL,
+            content=verify_content,
+            plugins=verify_plugins,
+            response_schema=VERIFICATION_SCHEMA,
+            schema_name="aec_verification",
         )
-        verified_data = parse_findings_response(verified_raw)
-        if verified_data is None:
-            raise RuntimeError("Verifier did not return an errors array")
-        verified = clean_errors(verified_data, files)
-        if candidates and not verified:
-            raise RuntimeError("Verifier returned no usable findings")
-        # A truncated verifier response must not silently erase most of a good
-        # discovery pass.  The verifier can legitimately reject a minority of
-        # weak candidates, but a severe unexplained count drop is more likely
-        # to be context/output truncation than a trustworthy adjudication.
-        if len(candidates) >= 3 and len(verified) * 2 < len(candidates):
-            raise RuntimeError(
-                "Verifier returned a suspiciously incomplete candidate set"
-            )
+        del verify_content
+        verified_data = parse_json_object(verified_raw)
+
+        # Backward-compatible parsing makes provider schema regressions safe:
+        # legacy `errors` responses are accepted only when they do not look
+        # severely truncated. Normal strict-schema responses use explicit IDs.
+        if isinstance(verified_data.get("errors"), list):
+            verified = clean_errors(verified_data, files)
+            if candidates and not verified:
+                raise RuntimeError("Verifier returned no usable findings")
+            if len(candidates) >= 3 and len(verified) * 2 < len(candidates):
+                raise RuntimeError("Legacy verifier response appears incomplete")
+            return verified
+
+        required = ("accepted_ids", "rejected_ids", "corrected_errors", "added_errors")
+        if not all(isinstance(verified_data.get(key), list) for key in required):
+            raise RuntimeError("Verifier did not return the verdict schema")
+
+        accepted = {
+            value
+            for value in verified_data["accepted_ids"]
+            if isinstance(value, int) and 0 <= value < len(candidates)
+        }
+        rejected = {
+            value
+            for value in verified_data["rejected_ids"]
+            if isinstance(value, int) and 0 <= value < len(candidates)
+        }
+        corrected: dict[int, dict[str, str]] = {}
+        for raw in verified_data["corrected_errors"]:
+            if not isinstance(raw, dict):
+                continue
+            candidate_id = raw.get("candidate_id")
+            if not isinstance(candidate_id, int) or not 0 <= candidate_id < len(candidates):
+                continue
+            cleaned = clean_errors({"errors": [raw]}, files)
+            if cleaned:
+                corrected[candidate_id] = cleaned[0]
+
+        verified = []
+        for candidate_id, candidate in enumerate(candidates):
+            if candidate_id in corrected:
+                verified.append(corrected[candidate_id])
+            elif candidate_id in rejected and candidate_id not in accepted:
+                continue
+            else:
+                # Accepted and unreviewed IDs both survive. This lets explicit
+                # rejects improve precision without allowing truncation to erase recall.
+                verified.append(candidate)
+        added = clean_errors({"errors": verified_data["added_errors"]}, files)
+        verified = clean_errors({"errors": verified + added}, files)
         log(f"Verification retained {len(verified)} finding(s)")
         return verified
     except Exception as exc:
@@ -497,10 +626,41 @@ def audit_batched(files: list[Path], batches: list[list[Path]]) -> list[dict[str
             "documents may be reviewed in separate batches; report supported errors in "
             "these files and preserve exact identifiers for the global verification pass."
         )
+        if any(path.stat().st_size > MAX_NATIVE_PDF_BYTES for path in batch):
+            log(f"Batch {index} contains an oversized PDF; using bounded extracted text")
+            batch_text = extracted_text(batch)
+            if not batch_text:
+                log(f"Oversized batch {index} has no extractable text; skipping it")
+                continue
+            try:
+                raw = call_model(
+                    model=MODEL,
+                    content=[
+                        {
+                            "type": "text",
+                            "text": batch_prompt
+                            + "\n\nUNTRUSTED_DOCUMENTS_BEGIN\n"
+                            + batch_text
+                            + "\nUNTRUSTED_DOCUMENTS_END",
+                        }
+                    ],
+                    plugins=None,
+                )
+            except Exception as text_exc:
+                log(f"Text analysis for oversized batch {index} failed: {text_exc}")
+                continue
+            data = parse_findings_response(raw)
+            discovered = clean_errors(data or {}, files)
+            candidates = clean_errors({"errors": candidates + discovered}, files)
+            log(f"Batch {index} produced {len(discovered)} valid candidate(s)")
+            continue
+
         content, plugins = pdf_content(batch, batch_prompt)
         try:
             raw = call_model(model=MODEL, content=content, plugins=plugins)
+            del content
         except Exception as exc:
+            del content
             log(f"Native batch {index} failed; trying its extracted text: {exc}")
             batch_text = extracted_text(batch)
             if not batch_text:
@@ -567,6 +727,7 @@ def audit(files: list[Path]) -> list[dict[str, str]]:
     try:
         raw = call_model(model=MODEL, content=discovery_content, plugins=plugins)
     except Exception as exc:
+        del discovery_content
         log(f"Native PDF analysis failed; retrying with extracted text: {exc}")
         text_cache = extracted_text(files)
         if not text_cache:
@@ -586,6 +747,7 @@ def audit(files: list[Path]) -> list[dict[str, str]]:
         )
         native_files: list[Path] | None = None
     else:
+        del discovery_content
         # Preserve text-only verification for oversized singleton inputs.
         if not oversized_singleton:
             native_files = files
@@ -610,8 +772,9 @@ def write_output(errors: list[dict[str, str]]) -> None:
 
 
 def main() -> int:
-    global DEADLINE
+    global DEADLINE, PROVIDER_CALLS
     DEADLINE = time.monotonic() + RUN_BUDGET_SECONDS
+    PROVIDER_CALLS = 0
     errors: list[dict[str, str]] = []
     try:
         files = pdf_files()
